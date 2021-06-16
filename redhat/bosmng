@@ -1,0 +1,1217 @@
+##############################################################
+#  Create for : bosmng                                       #
+#  Create by  : weiqs                                        #
+#  Create on  : 2018-01-01                                   #
+#  Create at  : Bank of ShangHai                             #
+#  System of  : RedHat                                       #
+##############################################################
+
+PID=$$
+
+#帮助菜单
+HelpMenu()
+{
+    echo "Please Usage : bosmng [ -c -h ] [ -i -o ] [ SysName ] [ SvrId ] [ DelSysName ]"
+
+    echo "  [-c] Input|Output ChnlName                            如: bosmng -c -o EBIP"
+    echo "  [-c] Input|Output ChnlName                            如: bosmng -c -i EBIP"
+    echo "  [-h] Input|Output HostName                            如: bosmng -h -o CPC"
+    echo "  [-h] Input|Output HostName                            如: bosmng -h -i CPC"
+
+    echo ""
+    echo "  [-c] Input|Output ChnlName SvrId                      如: bosmng -c -o EBIP 163001601"
+    echo "  [-c] Input|Output ChnlName SvrId                      如: bosmng -c -i EBIP 163001601"
+    echo "  [-h] Input|Output HostName SvrId                      如: bosmng -h -o CPC  163001601"
+    echo "  [-h] Input|Output HostName SvrId                      如: bosmng -h -i CPC  163001601"
+
+    echo ""
+    echo "  [-c] Input|Output ChnlName SvrId DelChnlName          如: bosmng -c -o EBIP103 163001601 EBIP"
+    echo "  [-c] Input|Output ChnlName SvrId DelChnlName          如: bosmng -c -i EBIP103 163001601 EBIP"
+    echo "  [-h] Input|Output HostName SvrId DelHostName          如: bosmng -h -o CPC280  163001601 CPC"
+    echo "  [-h] Input|Output HostName SvrId DelHostName          如: bosmng -h -i CPC280  163001601 CPC"
+}
+
+#定义文件后缀
+TAG="sql"
+
+#定义临时变量
+HOMEPATH=$HOME/tmp/bosmng
+mkdir -p ${HOMEPATH}
+FERR=${HOMEPATH}/.ferr.${PID}
+FSTR=${HOMEPATH}/.fstr.${PID}
+FTMP=${HOMEPATH}/.ftmp.${TAG}.${PID}
+
+#定义打印格式
+NORM="\033[0m"
+BOLD="\033[1m"
+BLNK="\033[5m"
+HIGH="\033[7m"
+
+#默认服务配置
+if [ "x$FDIR" = "x" ];then
+    FDIR=$HOME/usr/bosmng
+    mkdir -p $FDIR
+    #echo "导出配置在默认[$FDIR]目录"
+fi
+
+#判断输入参数
+if [ $# -ne 3 ] && [ $# -ne 4 ] && [ $# -ne 5 ];then
+    HelpMenu
+    exit
+fi
+if [ "$3" = "$5" ];then
+    echo "切换前和切换后系统不能为同一个"
+    exit
+fi
+
+#定义传入参数
+Type=$1
+Flag=$2
+SvrNode=$3
+SvrId=$4
+DelSvrNode=$5
+#如果是回退带5个参数，则需要将SvrNode和DelSvrNode互转
+if [ "x${DelSvrNode}" != "x" ] && [[ "${ENVARTF}x" =~ "htx" ]];then
+    SvrNode=$5
+    DelSvrNode=$3
+fi
+
+#清理5分钟前过期文件
+CleanTmpTOU(){
+    DELDIR=$1
+    if [[ ! ${DELDIR} =~ "tmp" ]];then
+        PrtMsg "只有路径包含tmp目录允许清理" ${BOLD} ${NORM}
+        return
+    fi
+    perl -e 'my $dir="'"$DELDIR"'";opendir DH,$dir or die "cannot chdir to $dir : $!";for my $file(readdir DH){my $fpath=$dir."/".$file;if((time()-(stat($fpath))[10])>300){unlink $fpath;}}closedir DH;'
+}
+CleanTmpTOU ${HOMEPATH}
+
+#打印函数
+PrtMsg()
+{
+    mesg=$1
+    head=$2
+    tail=$3
+
+    echo -e "${head}${mesg}${tail}"
+}
+
+#文件处理为in条件语句格式
+GetStrIn()
+{
+    inputfile=$1
+    perl -p -e 's/\|/\n/g' ${inputfile} |sort|uniq|grep -vE "^$|^#"|perl -p -e 's/\n/|/g'|sed "s/^/'/g;s/|$/'/g;s/|/','/g;"
+
+    #使用artf脚本时复制protocolid和dataadapter到databak目录下
+    copyfile=`echo ${inputfile}|awk '{if($0 ~/sqldata/) {gsub("sqldata","databak",$0);print $0}}'` 
+    if [ "x${copyfile}" != "x" ];then
+        copypath=`echo ${copyfile}|awk -F '/' '{split($0,arr,"/")} {for(i=1;i<NF;i++)printf("%s/",arr[i])}'`
+        mkdir -p ${copypath}
+        cp -p ${inputfile} ${copyfile}
+    fi
+}
+
+#数据库导出
+DumpDb()
+{
+    TABLENM="$1"
+    CONDITION="$2"
+    FOUT="$3"
+
+    #mysqldump -u${DBUSER} -p${DBPWD} -h${DBADDR} ${DBNM} --default-character-set=utf8 --complete-insert --no-create-db --no-create-info --compact --set-gtid-purged=OFF --skip-comments --skip-extended-insert --single-transaction --where "${CONDITION}" "${TABLENM}" 2>${FERR} > ${FOUT}
+    isqldump --default-character-set=utf8 --complete-insert --no-create-db --no-create-info --compact --set-gtid-purged=OFF --skip-comments --skip-extended-insert --single-transaction --skip-triggers --where "${CONDITION}" "${TABLENM}" 2>${FERR} > ${FOUT}
+}
+
+#数据库操作函数
+OperateDB()
+{
+    FSQL="$1"
+    FOUT="$2"
+
+    if [ ! -s ${FSQL} ];then
+        PrtMsg "执行sql不存在"
+        echo "NULL" > ${FERR}
+        return
+    fi
+
+    #mysql -u${DBUSER} -p${DBPWD} -h${DBADDR} ${DBNM} --force -N < ${FSQL} 2>${FERR} > ${FOUT}
+    isql --force -N < ${FSQL} 2>${FERR} > ${FOUT}
+}
+
+#比较数据
+CompareData()
+{
+    PrtMsg=$1
+    NewFile=$2
+    StdFile=$3
+    Ret=$4
+    
+    NewTmp=${HOMEPATH}/.newtmp.${PID}
+    StdTmp=${HOMEPATH}/.stdtmp.${PID}
+    DifTmp=${HOMEPATH}/.diftmp.${PID}
+    DelTmp=${HOMEPATH}/.deltmp.${PID}
+
+    if [ ! -s ${StdFile} ];then
+        return
+    fi
+    
+    xmllint --format ${NewFile} --noout
+    RETCODE=$?
+    if [ ${RETCODE} -ne 0 ];then
+        eval ${Ret}=${RETCODE}
+        return
+    fi
+    
+    xmllint --format ${NewFile} | grep -vE "<\!--|-->" 2>/dev/null > ${NewTmp}
+    xmllint --format ${StdFile} | grep -vE "<\!--|-->" 2>/dev/null > ${StdTmp}
+
+    diff ${NewTmp} ${StdTmp} | grep -v "<\!--" | grep -E "^>" | sed 's/^>//' > ${DelTmp}
+    if [ "${DIRECTCOPY}" = "true" ];then
+        if [ -s ${DelTmp} ];then
+            PrtMsg "diff ${NewTmp} ${StdTmp}" "${NORM}" "${NORM}"
+            more ${DelTmp}
+
+            PrtMsg "新文件缺少内容，请确认是否覆盖[y/n]?" "${NORM}" "${NORM}"
+            if [[ ${HOSTNMID} =~ "PROD" ]];then
+                PrtMsg "生产模式" "${NORM}" "${NORM}"
+            else
+                read -t 5 input
+                case $input in
+                Y|y)
+                    ;;
+                N|n)
+                    eval ${Ret}=-1
+                    return
+                    ;;
+                *)
+                    eval ${Ret}=-1
+                    return
+                    ;;
+                esac
+            fi
+            PrtMsg "新文件缺少内容，fail" "${NORM}" "${NORM}"
+        fi
+        cp -p ${NewFile} ${StdFile} 2>/dev/null
+        eval ${Ret}=$?
+        return
+    fi
+    
+    diff ${NewTmp} ${StdTmp} | grep -v "<\!--" | grep -E "^<|^>" > ${DifTmp}
+    if [ -s ${DifTmp} ];then
+        java -jar $HOME/bin/XMLWrite.jar ${SvrNode} ${SvrId} "${NewFile}" "${StdFile}"
+        eval ${Ret}=$?
+    else
+        eval ${Ret}=0
+    fi
+
+    rm -f ${NewTmp} ${StdTmp} ${DifTmp} 2>/dev/null
+}
+
+#比较metadata
+CompareMetaData()
+{
+    PrtMsg=$1
+    NewFile=$2
+    StdFile=$3
+    Ret=$4
+
+    NewTmp=${HOMEPATH}/.newtmp.${PID}
+    StdTmp=${HOMEPATH}/.stdtmp.${PID}
+    AddTmp=${HOMEPATH}/.addtmp.${PID}
+    DelTmp=${HOMEPATH}/.deltmp.${PID}
+    MetTmp=${HOMEPATH}/metadata.xml.${PID}
+
+    if [ ! -s ${StdFile} ];then
+        return
+    fi
+
+    xmllint --format ${NewFile} --noout
+    RETCODE=$?
+    if [ ${RETCODE} -ne 0 ];then
+        eval ${Ret}=${RETCODE}
+        return
+    fi
+
+    #格式化xml文件并排序
+    xmllint --format ${NewFile} | grep -vE "^<\/metadata>|^<metadata>|^<\?xml" | sort 2>/dev/null > ${NewTmp}
+    xmllint --format ${StdFile} | grep -vE "^<\/metadata>|^<metadata>|^<\?xml" | sort 2>/dev/null > ${StdTmp}
+
+    diff ${NewTmp} ${StdTmp} | grep -v "<\!--" | grep -E "^<" | sed 's/^<//' > ${AddTmp}
+    diff ${NewTmp} ${StdTmp} | grep -v "<\!--" | grep -E "^>" | sed 's/^>//' > ${DelTmp}
+
+    if [ "${DIRECTCOPY}" = "true" ];then
+        if [ -s ${DelTmp} ];then
+            PrtMsg "diff ${NewTmp} ${StdTmp}" "${NORM}" "${NORM}"
+            more ${DelTmp}
+
+            PrtMsg "新文件缺少内容，请确认是否覆盖[y/n]?" "${NORM}" "${NORM}"
+            if [[ ${HOSTNMID} =~ "PROD" ]];then
+                PrtMsg "生产模式" "${NORM}" "${NORM}"
+            else
+                read -t 5 input
+                case $input in
+                Y|y)
+                    ;;
+                N|n)
+                    eval ${Ret}=-1
+                    return
+                    ;;
+                *)
+                    eval ${Ret}=-1
+                    return 
+                    ;;
+                esac
+            fi
+            PrtMsg "新文件缺少内容，fail" "${NORM}" "${NORM}"
+        fi
+        cp -p ${NewFile} ${StdFile} 2>/dev/null
+        eval ${Ret}=$?
+        return
+    fi
+
+    if [ -s ${DelTmp} ] && [ -s ${AddTmp} ];then
+        echo '<?xml version="1.0" encoding="utf-8"?><metadata>' > ${DelTmp}
+        cat ${AddTmp} >> ${DelTmp}
+        echo '</metadata>' >> ${DelTmp}
+        
+        cp -p ${StdFile} ${MetTmp} 
+        java -jar $HOME/bin/XMLWrite.jar ${SvrNode} ${SvrId} "${NewFile}" "${MetTmp}" "${DelTmp}" 
+        eval ${Ret}=$?
+
+        if [ ${Ret} -eq 0 ];then
+            PrtMsg "[${SvrNode}-${SvrId}-metadata.xml] add:`cat ${AddTmp}`" "${NORM}" "${NORM}"
+            cp -p ${MetTmp} ${StdFile}
+        fi
+    else
+        if [ -s ${AddTmp} ];then
+            PrtMsg "[${SvrNode}-${SvrId}-metadata.xml] add:`cat ${AddTmp}`" "${NORM}" "${NORM}"
+            cp -p ${NewFile} ${StdFile}
+        fi        
+        eval ${Ret}=0
+    fi
+    rm -f ${NewTmp} ${StdTmp} ${AddTmp} ${DelTmp} ${MetTmp} 2>/dev/null
+}
+
+#复制Xml文件,并执行xml校验
+CopyXml()
+{
+
+    InOut=$1
+    PrtMsg=$2
+    SrcNm=$3
+    DesNm=$4
+    FileNm=`echo ${DesNm}|awk -F '/' '{print $NF}'`
+
+    if [ "${DesNm#${FDIR}/}" != "${DesNm}" ];then
+        #rm -f ${DesNm}
+        flag="output"
+    else
+        flag="input"
+        #避免新增服务回退无法删除
+        if [ ! -f ${SrcNm} ] && [[ ${SrcNm} =~ "databak" ]];then
+            mv ${DesNm} ${DesNm}.`date +%Y%m%d%H%M%S`
+        fi
+    fi 
+
+    if [ -s ${SrcNm} ];then
+        xmllint --format ${SrcNm} --noout 2>/dev/null
+        if [ $? -ne 0 ];then
+            PrtMsg "[${PrtMsg}-${FileNm}] xml check fail 校验不通过,请确认" "${NORM}" "${NORM}"
+            if [ "x${ARTFPACKFLAG}" != "x" ] && [ "$REMOTE" != "true" ];then
+                read -t 1
+            fi
+        fi
+  
+        cp -p ${SrcNm} ${DesNm} 2>/dev/null
+        if [ $? -ne 0 ];then
+            PrtMsg "[${PrtMsg}-${FileNm}] ${flag} fail" "${NORM}" "${NORM}"
+            export EXITFLAG=true
+        else
+            PrtMsg "[${PrtMsg}-${FileNm}] ${flag} succ" "${NORM}" "${NORM}"
+        fi
+    else
+        PrtMsg "[${PrtMsg}-${FileNm}] 文件为空,请确认" "${NORM}" "${NORM}"
+        if [ "x${ARTFPACKFLAG}" != "x" ] && [ "$REMOTE" != "true" ];then
+            read -t 1
+        fi
+    fi
+}
+
+#运行平台服务配置文件导出
+OutputAppSvr()
+{
+    InOut=$1
+
+    if [ "x${SvrId}" = "x" ];then
+        #PrtMsg "服务码为空" "${NORM}" "${NORM}"
+        return
+    fi
+
+    #定义目录
+    ConfDir=$HOME/SmartESB/configs/${InOut}
+    MetaDir=${ConfDir}/metadata
+    SvrcDir=${MetaDir}/${SvrNode}
+    FConfDir=${FDIR}/${InOut}
+    FMetaDir=${FConfDir}/metadata
+    FSvrcDir=${FMetaDir}/${SvrNode}
+    mkdir -p ${FSvrcDir}
+    mkdir -p ${SvrcDir}
+    PrtMsg "配置导出目录[${FSvrcDir}]" "${NORM}" "${NORM}"
+    
+    #定义文件名
+    ChlSvr="channel_${SvrNode}_service_${SvrId}.xml"
+    SysSvr="service_${SvrId}_system_${SvrNode}.xml"
+    SvrSvr="service_${SvrId}.xml"
+
+    CopyXml ${InOut} ${SvrNode}-${SvrId} "${SvrcDir}/${ChlSvr}" "${FSvrcDir}/${ChlSvr}"
+    CopyXml ${InOut} ${SvrNode}-${SvrId} "${SvrcDir}/${SysSvr}" "${FSvrcDir}/${SysSvr}"
+    #服务定义文件存在或者是out服务定义，则需要导出
+    if [ -s ${SvrcDir}/${SvrSvr} ] || [ "${InOut}" = "out_conf" ];then
+        CopyXml ${InOut} ${SvrNode}-${SvrId} "${SvrcDir}/${SvrSvr}" "${FSvrcDir}/${SvrSvr}"
+    fi
+
+    chmod -R 755 ${FConfDir}
+
+    #服务变更系统时备份老系统
+    if [ "x${DelSvrNode}" != "x" ];then
+        DelSvrcDir=${MetaDir}/${DelSvrNode}
+        DelFSvrcDir=${FMetaDir}/${DelSvrNode}
+        mkdir -p ${DelFSvrcDir}
+        mkdir -p ${DelSvrcDir}
+    
+        DelChlSvr="channel_${DelSvrNode}_service_${SvrId}.xml"
+        DelSysSvr="service_${SvrId}_system_${DelSvrNode}.xml"
+        DelSvrSvr="service_${SvrId}.xml"
+         
+        PrtMsg "配置导出目录[${DelFSvrcDir}]" "${NORM}" "${NORM}"
+        CopyXml ${InOut} ${DelSvrNode}-${SvrId} "${DelSvrcDir}/${DelChlSvr}" "${DelFSvrcDir}/${DelChlSvr}"
+        CopyXml ${InOut} ${DelSvrNode}-${SvrId} "${DelSvrcDir}/${DelSysSvr}" "${DelFSvrcDir}/${DelSysSvr}"
+        CopyXml ${InOut} ${DelSvrNode}-${SvrId} "${DelSvrcDir}/${DelSvrSvr}" "${DelFSvrcDir}/${DelSvrSvr}"
+    fi 
+
+    echo ""
+}
+
+#运行平台服务配置文件导入
+InputAppSvr()
+{
+    InOut=$1
+
+    if [ "x${SvrId}" = "x" ];then
+        PrtMsg "服务码为空" "${NORM}" "${NORM}"
+        return
+    fi
+
+    #定义目录
+    ConfDir=$HOME/SmartESB/configs/${InOut}
+    MetaDir=${ConfDir}/metadata
+    SvrcDir=${MetaDir}/${SvrNode}
+    FConfDir=${FDIR}/${InOut}
+    FMetaDir=${FConfDir}/metadata
+    FSvrcDir=${FMetaDir}/${SvrNode}
+    mkdir -p ${FSvrcDir}
+    mkdir -p ${SvrcDir}
+    PrtMsg "配置导入目录[${FSvrcDir}]" "${NORM}" "${NORM}"
+
+    #定义文件名称
+    ChlSvr="channel_${SvrNode}_service_${SvrId}.xml"
+    SysSvr="service_${SvrId}_system_${SvrNode}.xml"
+    SvrSvr="service_${SvrId}.xml"
+
+    #变更系统时删除老系统下配置
+    if [ "x${DelSvrNode}" != "x" ];then
+        DelSvrcDir=${MetaDir}/${DelSvrNode}
+        DelChlSvr="channel_${DelSvrNode}_service_${SvrId}.xml"
+        DelSysSvr="service_${SvrId}_system_${DelSvrNode}.xml"
+        DelSvrSvr="service_${SvrId}.xml"
+
+        #清理切换前java和class
+        if [ "${InOut}" = "in_conf" ];then
+            LOCALEFLAG=local_in
+        elif [ "${InOut}" = "out_conf" ];then
+            LOCALEFLAG=local_out
+        fi
+        SRCDIR=${HOME}/SmartESB/bin/jar/${LOCALEFLAG}/src
+        CLSDIR=${HOME}/SmartESB/bin/jar/${LOCALEFLAG}/classes/com/dc/governance/metadata/impls/runtime
+        DELSRCCHL=${SRCDIR}/Parser_Channel_${DelSvrNode}_Service_${SvrId}.java
+        DELSRCHST=${SRCDIR}/Packer_Service_${SvrId}_System_${DelSvrNode}.java
+        DELCLSCHL=${CLSDIR}/Parser_Channel_${DelSvrNode}_Service_${SvrId}.class
+        DELCLSHST=${CLSDIR}/Packer_Service_${SvrId}_System_${DelSvrNode}.class
+
+        BAKSRCDIR=${DELARTFDATABAK}/javaclass
+        mkdir -p ${BAKSRCDIR}
+        BAKSRCCHL=${BAKSRCDIR}/Parser_Channel_${DelSvrNode}_Service_${SvrId}.java
+        BAKSRCHST=${BAKSRCDIR}/Packer_Service_${SvrId}_System_${DelSvrNode}.java
+        BAKCLSCHL=${BAKSRCDIR}/Parser_Channel_${DelSvrNode}_Service_${SvrId}.class
+        BAKCLSHST=${BAKSRCDIR}/Packer_Service_${SvrId}_System_${DelSvrNode}.class
+        
+        #删除java和class
+        #rm -f ${DELSRCCHL} ${DELSRCHST} ${DELCLSCHL} ${DELCLSHST}
+        if [[ "${ENVARTF}x" =~ ".hbx" ]];then
+            mv ${DELSRCCHL} ${BAKSRCCHL} 2>/dev/null
+            mv ${DELSRCHST} ${BAKSRCHST} 2>/dev/null
+            mv ${DELCLSCHL} ${BAKCLSCHL} 2>/dev/null
+            mv ${DELCLSHST} ${BAKCLSHST} 2>/dev/null
+        elif [[ "${ENVARTF}x" =~ ".htx" ]];then
+            mv ${BAKSRCCHL} ${DELSRCCHL} 2>/dev/null
+            mv ${BAKSRCHST} ${DELSRCHST} 2>/dev/null
+            mv ${BAKCLSCHL} ${DELCLSCHL} 2>/dev/null
+            mv ${BAKCLSHST} ${DELCLSHST} 2>/dev/null
+        fi
+        
+        if [ -s ${FSvrcDir}/${ChlSvr} ];then
+            rm -f ${DelSvrcDir}/${DelChlSvr}
+            PrtMsg "[${DelSvrNode}-${SvrId}-${DelChlSvr}] delete succ" "${NORM}" "${NORM}"
+            CopyXml ${InOut} ${SvrNode}-${SvrId} "${FSvrcDir}/${ChlSvr}" "${SvrcDir}/${ChlSvr}"
+        else
+            mv ${DelSvrcDir}/${DelChlSvr} ${SvrcDir}/${ChlSvr}
+            PrtMsg "[${DelSvrNode}-${SvrId}-${DelChlSvr}] mv succ" "${NORM}" "${NORM}"
+        fi
+        if [ -s ${FSvrcDir}/${SysSvr} ];then
+            rm -f ${DelSvrcDir}/${DelSysSvr}
+            PrtMsg "[${DelSvrNode}-${SvrId}-${DelSysSvr}] delete succ" "${NORM}" "${NORM}"
+            CopyXml ${InOut} ${SvrNode}-${SvrId} "${FSvrcDir}/${SysSvr}" "${SvrcDir}/${SysSvr}"
+        else
+            mv ${DelSvrcDir}/${DelSysSvr} ${SvrcDir}/${SysSvr}
+            PrtMsg "[${DelSvrNode}-${SvrId}-${DelSysSvr}] mv succ" "${NORM}" "${NORM}"
+        fi
+        if [ -s ${FSvrcDir}/${SvrSvr} ];then
+            rm -f ${DelSvrcDir}/${DelSvrSvr}
+            PrtMsg "[${DelSvrNode}-${SvrId}-${DelSvrSvr}] delete succ" "${NORM}" "${NORM}"
+            CopyXml ${InOut} ${SvrNode}-${SvrId} "${FSvrcDir}/${SvrSvr}" "${SvrcDir}/${SvrSvr}"
+        else
+            mv ${DelSvrcDir}/${DelSvrSvr} ${SvrcDir}/${SvrSvr}
+            PrtMsg "[${DelSvrNode}-${SvrId}-${DelSvrSvr}] mv succ" "${NORM}" "${NORM}"
+        fi
+        return
+    fi
+
+    #如果不存在-o导出的服务拆组包文件，则认为只需刷时间戳
+    if [ ! -s ${FSvrcDir}/${ChlSvr} ] || [ ! -s ${FSvrcDir}/${SysSvr} ];then
+        if [ -s ${SvrcDir}/${ChlSvr} ];then
+            touch ${SvrcDir}/${ChlSvr}
+        fi
+        if [ -s ${SvrcDir}/${SysSvr} ];then
+            touch ${SvrcDir}/${SysSvr}
+        fi
+        PrtMsg "只刷新[${SvrcDir}/${ChlSvr}][${SvrcDir}/${SysSvr}]服务拆组包时间戳" "${NORM}" "${NORM}"
+        return
+    fi
+
+    CopyXml ${InOut} ${SvrNode}-${SvrId} "${FSvrcDir}/${ChlSvr}" "${SvrcDir}/${ChlSvr}"
+    CopyXml ${InOut} ${SvrNode}-${SvrId} "${FSvrcDir}/${SysSvr}" "${SvrcDir}/${SysSvr}"
+    #包里有服务定义则导入
+    if [ -s ${FSvrcDir}/${SvrSvr} ];then
+        CopyXml ${InOut} ${SvrNode}-${SvrId} "${FSvrcDir}/${SvrSvr}" "${SvrcDir}/${SvrSvr}"
+    fi
+    #同步out服务定义到in中
+    outsvrsvr=`ls -lt ${HOME}/SmartESB/configs/out_conf/metadata/*/${SvrSvr} 2>/dev/null | head -1 | awk '{print $NF}'`
+    if [ "x${outsvrsvr}" != "x" ] && [ -s ${outsvrsvr} ];then
+        ls ${HOME}/SmartESB/configs/in_conf/metadata/*/${SvrSvr} 2>/dev/null | while read insvrsvr
+        do
+            cp -p ${outsvrsvr} ${insvrsvr}
+            echo "cp -p ${outsvrsvr} ${insvrsvr}"
+        done
+    fi
+
+    #判断是否通过artf来执行
+    if [ "x${ENVARTF}" != "x" ];then
+        ARTFFILE=${HOMEPATH}/${ENVARTF}.${InOut}
+        if [ -f ${ARTFFILE} ];then
+            return
+        else
+            touch ${ARTFFILE}
+        fi
+    fi
+
+    chmod -R 755 ${ConfDir}
+    echo ""
+}
+
+#导出数据
+DumpOut()
+{
+    PrtFlag="$1"
+    TABLENM="$2"
+    CONDITION="$3"
+    FPATH="$4"
+    FOUT=${FPATH}/${TABLENM}.insert.${TAG} 
+    FUPD=${FPATH}/${TABLENM}.update.${TAG}
+
+    DumpDb ${TABLENM} "${CONDITION}" ${FOUT}
+    if [ `cat ${FERR}|grep -v "Warning"|wc -l` -ne 0 ];then
+        cat ${FERR}|grep -Ei "ERROR|error"
+        PrtMsg "[${PrtFlag}-${TABLENM}] output fail" "${NORM}" "${NORM}"
+    elif [ ! -s ${FOUT} ];then
+        PrtMsg "[${PrtFlag}-${TABLENM}] data is null" "${NORM}" "${NORM}"
+    else
+        PrtMsg "[${PrtFlag}-${TABLENM}] output succ" "${NORM}" "${NORM}"
+    fi
+
+    #生成更新语句
+    if [ "${TABLENM}" = "protocolbind" ];then
+        >${FUPD}
+        perl -p -e 's/\|/\n/g' ${FPATH}/protocolid|sort|uniq|grep -vE "^$|^#"|sed "s/^/'/g;s/$/'/g;" | while read wherestr
+        do
+            echo "select concat(\"update protocolbind set bindtype='\",ifnull(bindtype, ''),\"', binduri='\",ifnull(binduri, ''),\"', requestadapter='\",ifnull(requestadapter, ''),\"', responseadapter='\",ifnull(responseadapter, ''),\"', threadpool='\",ifnull(threadpool, ''),\"' where protocolid = ${wherestr};\") from protocolbind where protocolid = ${wherestr};" > ${FTMP}
+            OperateDB ${FTMP} ${FSTR}
+            cat ${FSTR} >> ${FUPD}
+        done  
+    fi
+    if [ "${TABLENM}" = "esb_adapter_template" ];then
+        >${FUPD}
+        perl -p -e 's/\|/\n/g' ${FPATH}/dataadapter|sort|uniq|grep -vE "^$|^#"|sed "s/^/'/g;s/$/'/g;" | while read wherestr
+        do
+            echo "select concat(\"update esb_adapter_template set adapters='\",ifnull(adapters, ''),\"', type='\",ifnull(type, ''),\"', remark='\",ifnull(remark, ''),\"', protocoladapter='\",ifnull(protocoladapter, ''),\"' where name = ${wherestr};\") from esb_adapter_template where name = ${wherestr};" > ${FTMP}
+            OperateDB ${FTMP} ${FSTR}
+            cat ${FSTR} >> ${FUPD}
+        done
+    fi
+}
+
+#导入数据
+DumpIn()
+{
+    PrtFlag="$1"
+    TABLENM="$2"
+    CONDITION="$3"
+    FPATH="$4"
+    FINT=${FPATH}/${TABLENM}.insert.${TAG}
+    FUPD=${FPATH}/${TABLENM}.update.${TAG}
+    FOUT=${FPATH}/.${TABLENM}.backup.${TAG}
+    FDEL=${FPATH}/.${TABLENM}.delete.${TAG}
+
+    DumpDb ${TABLENM} "${CONDITION}" ${FOUT}
+    if [ `cat ${FERR}|grep -v "Warning"|wc -l` -ne 0 ];then
+        cat ${FERR}|grep -Ei "ERROR|error"
+        PrtMsg "[${PrtFlag}-${TABLENM}] output fail" "${NORM}" "${NORM}"
+    fi
+
+    #如果导入数据为空，则跳过
+    if [ ! -s ${FINT} ];then
+        PrtMsg "[${PrtFlag}-${TABLENM}] new data is null, error!!!" "${NORM}" "${NORM}"
+        return
+    fi
+
+    #比较数据
+    Ret=`diff --brief "${FOUT}" "${FINT}"`
+    if [ "x${Ret}" = "x" ];then
+        PrtMsg "[${PrtFlag}-${TABLENM}] no change skip ..." "${NORM}" "${NORM}"
+        return
+    else
+        PrtMsg "[${PrtFlag}-${TABLENM}] have change " "${NORM}" "${NORM}"
+    fi
+
+    #执行语句
+    if [ "${TABLENM}" = "protocolbind" ];then 
+        OperateDB ${FINT} ${FSTR}
+        if [ `cat ${FERR}|grep -v "Warning"|wc -l` -ne 0 ];then
+            OperateDB ${FUPD} ${FSTR}
+            if [ `cat ${FERR}|grep -v "Warning"|wc -l` -ne 0 ];then
+                cat ${FERR}|grep -Ei "ERROR|error"
+                PrtMsg "[${PrtFlag}-${TABLENM}] update fail" "${NORM}" "${NORM}"
+                export EXITFLAG=true
+            else
+                PrtMsg "[${PrtFlag}-${TABLENM}] update succ" "${NORM}" "${NORM}"
+            fi
+        else
+            PrtMsg "[${PrtFlag}-${TABLENM}] insert succ" "${NORM}" "${NORM}"
+        fi
+    elif [ "${TABLENM}" = "esb_adapter_template" ];then
+        OperateDB ${FINT} ${FSTR}
+        if [ `cat ${FERR}|grep -v "Warning"|wc -l` -ne 0 ];then
+            #OperateDB ${FUPD} ${FSTR}
+            #if [ `cat ${FERR}|grep -v "Warning"|wc -l` -ne 0 ];then
+            #    cat ${FERR}|grep -Ei "ERROR|error"
+            #    PrtMsg "[${PrtFlag}-${TABLENM}] update fail" "${NORM}" "${NORM}"
+            #    export EXITFLAG=true
+            #else
+            #    PrtMsg "[${PrtFlag}-${TABLENM}] update succ" "${NORM}" "${NORM}"
+            #fi
+            PrtMsg "[${PrtFlag}-${TABLENM}] already exists" "${NORM}" "${NORM}"
+        else
+            PrtMsg "[${PrtFlag}-${TABLENM}] insert succ" "${NORM}" "${NORM}"
+        fi
+    else
+        echo "delete from ${TABLENM} where ${CONDITION};" > ${FDEL} 
+        OperateDB ${FDEL} ${FSTR}
+        if [ `cat ${FERR}|grep -v "Warning"|wc -l` -ne 0 ];then
+            cat ${FERR}|grep -Ei "ERROR|error"
+            PrtMsg "[${PrtFlag}-${TABLENM}] delete fail" "${NORM}" "${NORM}"
+        fi
+        OperateDB ${FINT} ${FSTR}  
+        if [ `cat ${FERR}|grep -v "Warning"|wc -l` -ne 0 ];then
+            cat ${FERR}|grep -Ei "ERROR|error"
+            PrtMsg "[${PrtFlag}-${TABLENM}] input fail" "${NORM}" "${NORM}"
+            export EXITFLAG=true
+        else
+            PrtMsg "[${PrtFlag}-${TABLENM}] input succ" "${NORM}" "${NORM}"
+        fi
+    fi
+}
+
+#删除指定条件数据
+DelSql()
+{
+    PrtFlag="$1"
+    TABLENM="$2"
+    CONDITION="$3"
+    FDEL=${FPATH}/.${TABLENM}.delete.${TAG}
+    
+    echo "delete from ${TABLENM} where ${CONDITION};" > ${FDEL}
+    OperateDB ${FDEL} ${FSTR}
+    if [ `cat ${FERR}|grep -v "Warning"|wc -l` -ne 0 ];then
+        cat ${FERR}|grep -Ei "ERROR|error"
+        PrtMsg "[${PrtFlag}-${TABLENM}] delete fail" "${NORM}" "${NORM}"
+    else
+        PrtMsg "[${PrtFlag}-${TABLENM}] delete succ" "${NORM}" "${NORM}"
+    fi
+}
+
+#更新指定条件数据
+UpDateSql()
+{
+    PrtFlag="$1"
+    TABLENM="$2"
+    CONDITION="$3"
+    SETSTR="$4"
+    FUPD=${FPATH}/${TABLENM}.update.${TAG}
+
+    echo "update ${TABLENM} set ${SETSTR} where ${CONDITION};" > ${FUPD}
+    OperateDB ${FUPD} ${FSTR}
+    if [ `cat ${FERR}|grep -v "Warning"|wc -l` -ne 0 ];then
+        cat ${FERR}|grep -Ei "ERROR|error"
+        PrtMsg "[${PrtFlag}-${TABLENM}] update fail" "${NORM}" "${NORM}"
+    else
+        PrtMsg "[${PrtFlag}-${TABLENM}] update succ" "${NORM}" "${NORM}"
+    fi
+}
+
+#管理渠道节点导出
+OutputMngChnlNode()
+{
+    FPATH=${FDIR}/sql/Chnl/${SvrNode}
+    mkdir -p ${FPATH}
+    PrtMsg "配置导出目录[${FPATH}]" "${NORM}" "${NORM}"
+        
+    #获取渠道protocolid
+    PROTOCOLID=${FPATH}/protocolid
+    echo "select protocolid from bindmap where serviceid ='${SvrNode}'" > ${FTMP}
+    OperateDB ${FTMP} ${PROTOCOLID}
+    protocolid=`GetStrIn ${PROTOCOLID}`
+
+    #获取渠道dataadapter
+    DATAADAPTER=${FPATH}/dataadapter
+    echo "select dataadapter from dataadapter where dataadapterid ='${SvrNode}'" > ${FTMP}
+    OperateDB ${FTMP} ${DATAADAPTER}
+    dataadapter=`GetStrIn ${DATAADAPTER}`
+
+    if [ "x${protocolid}" = "x" ] || [ "x${dataadapter}" = "x" ];then
+        PrtMsg "protocolid或dataadapter为空，请检查系统标识名称" "${NORM}" "${NORM}"
+        exit 1
+    fi
+
+    #导出新数据
+    DumpOut "${SvrNode}" "protocolbind" "protocolid in (${protocolid})" "${FPATH}" 
+    DumpOut "${SvrNode}" "esb_adapter_template" "name in (${dataadapter})" "${FPATH}" 
+    DumpOut "${SvrNode}" "bindmap" "(serviceid = '${SvrNode}') or (serviceid = 'local_in' and protocolid in (${protocolid}))" "${FPATH}" 
+    DumpOut "${SvrNode}" "serviceinfo" "serviceid = '${SvrNode}'" "${FPATH}" 
+    DumpOut "${SvrNode}" "services" "name = '${SvrNode}'" "${FPATH}" 
+    DumpOut "${SvrNode}" "dataadapter" "dataadapterid = '${SvrNode}'" "${FPATH}" 
+    echo ""
+}
+
+#管理渠道节点导入
+InputMngChnlNode()
+{
+    FPATH=${FDIR}/sql/Chnl/${SvrNode}
+    mkdir -p ${FPATH}
+    PrtMsg "配置导入目录[${FPATH}]" "${NORM}" "${NORM}"
+
+    #获取渠道protocolid
+    PROTOCOLID=${FPATH}/protocolid
+    if [ ! -s ${PROTOCOLID} ];then
+        PrtMsg "[${SvrNode}-bindmap] protocolid is null" "${BLNK}" "${NORM}"
+        exit 1
+    fi
+    protocolid=`GetStrIn ${PROTOCOLID}`
+
+    #获取渠道dataadapter
+    DATAADAPTER=${FPATH}/dataadapter
+    if [ ! -s ${DATAADAPTER} ];then
+        PrtMsg "[${SvrNode}-dataadapter] dataadapter is null" "${BLNK}" "${NORM}"
+        exit 1
+    fi
+    dataadapter=`GetStrIn ${DATAADAPTER}`
+
+    if [ "x${protocolid}" = "x" ] || [ "x${dataadapter}" = "x" ];then
+        PrtMsg "protocolid或dataadapter为空，请检查系统标识名称" "${NORM}" "${NORM}"
+        exit 1
+    fi
+
+    #导入数据
+    DumpIn "${SvrNode}" "protocolbind" "protocolid in (${protocolid})" "${FPATH}"
+    DumpIn "${SvrNode}" "esb_adapter_template" "name in (${dataadapter})" "${FPATH}" 
+    DumpIn "${SvrNode}" "bindmap" "(serviceid = '${SvrNode}') or (serviceid = 'local_in' and protocolid in (${protocolid}))" "${FPATH}"
+    DumpIn "${SvrNode}" "serviceinfo" "serviceid = '${SvrNode}'" "${FPATH}"
+    DumpIn "${SvrNode}" "services" "name = '${SvrNode}'" "${FPATH}" 
+    DumpIn "${SvrNode}" "dataadapter" "dataadapterid = '${SvrNode}'" "${FPATH}" 
+    echo ""
+}
+
+#管理系统节点导出
+OutputMngHostNode()
+{
+    FPATH=${FDIR}/sql/Host/${SvrNode}
+    mkdir -p ${FPATH}
+    PrtMsg "配置导出目录[${FPATH}]" "${NORM}" "${NORM}"
+
+    #获取系统protocolid
+    PROTOCOLID=${FPATH}/protocolid
+    echo "select adapter from servicesystemmap where name = '${SvrNode}';" > ${FTMP}
+    OperateDB ${FTMP} ${PROTOCOLID}
+    protocolid=`GetStrIn ${PROTOCOLID}`
+
+    #获取系统dataadapter
+    DATAADAPTER=${FPATH}/dataadapter
+    echo "select dataadapter from dataadapter where dataadapterid in(select serviceid from servicesystemmap where name = '${SvrNode}' );" > ${FTMP}
+    OperateDB ${FTMP} ${DATAADAPTER}
+    dataadapter=`GetStrIn ${DATAADAPTER}`
+
+    if [ "x${protocolid}" = "x" ] || [ "x${dataadapter}" = "x" ];then
+        PrtMsg "protocolid或dataadapter为空，请检查系统标识名称" "${NORM}" "${NORM}"
+        exit 1
+    fi
+
+    #导出新数据
+    DumpOut "${SvrNode}" "protocolbind" "protocolid in (${protocolid})" "${FPATH}"
+    DumpOut "${SvrNode}" "esb_adapter_template" "name in (${dataadapter})" "${FPATH}"
+    DumpOut "${SvrNode}" "bindmap" "serviceid = 'local_out' and protocolid in (${protocolid})" "${FPATH}"
+    DumpOut "${SvrNode}" "servicesystem" "name = '${SvrNode}'" "${FPATH}"
+    echo ""
+}
+
+#管理系统节点导入
+InputMngHostNode()
+{
+    FPATH=${FDIR}/sql/Host/${SvrNode}
+    mkdir -p ${FPATH}
+    PrtMsg "配置导入目录[${FPATH}]" "${NORM}" "${NORM}"
+
+    #获取系统protocolid
+    PROTOCOLID=${FPATH}/protocolid
+    if [ ! -s ${PROTOCOLID} ];then
+        PrtMsg "[${SvrNode}-bindmap] protocolid is null" "${BLNK}" "${NORM}"
+        exit 1
+    fi
+    protocolid=`GetStrIn ${PROTOCOLID}`
+
+    #获取系统dataadapter
+    DATAADAPTER=${FPATH}/dataadapter
+    if [ ! -s ${DATAADAPTER} ];then
+        PrtMsg "[${SvrNode}-dataadapter] dataadapter is null" "${BLNK}" "${NORM}"
+        exit 1
+    fi
+    dataadapter=`GetStrIn ${DATAADAPTER}`
+
+    if [ "x${protocolid}" = "x" ] || [ "x${dataadapter}" = "x" ];then
+        PrtMsg "protocolid或dataadapter为空，请检查系统标识名称" "${NORM}" "${NORM}"
+        exit 1
+    fi
+
+    #导入数据
+    DumpIn "${SvrNode}" "protocolbind" "protocolid in (${protocolid})" "${FPATH}"
+    DumpIn "${SvrNode}" "esb_adapter_template" "name in (${dataadapter})" "${FPATH}"
+    DumpIn "${SvrNode}" "bindmap" "serviceid = 'local_out' and protocolid in (${protocolid})" "${FPATH}"
+    DumpIn "${SvrNode}" "servicesystem" "name = '${SvrNode}'" "${FPATH}"
+    echo ""
+}
+
+#管理服务导出
+OutputMngHostSvr()
+{
+    FPATH=${FDIR}/sql/Svrc/${SvrId}
+    mkdir -p ${FPATH}
+    PrtMsg "配置导出目录[${FPATH}]" "${NORM}" "${NORM}"
+
+    #导出数据
+    DumpOut "${SvrId}" "services" "name='${SvrId}'" "${FPATH}"
+    DumpOut "${SvrId}" "bussservices" "serviceid='${SvrId}'" "${FPATH}"
+    DumpOut "${SvrId}" "serviceinfo" "serviceid='${SvrId}'" "${FPATH}"
+    DumpOut "${SvrId}" "bindmap" "serviceid='${SvrId}'" "${FPATH}"
+    DumpOut "${SvrId}" "dataadapter" "dataadapterid='${SvrId}'" "${FPATH}"
+    DumpOut "${SvrId}" "servicesystemmap" "serviceid='${SvrId}'" "${FPATH}"
+    DumpOut "${SvrId}" "deployments" "name='${SvrId}'" "${FPATH}" 
+    echo ""
+}
+
+#管理服务导入
+InputMngHostSvr()
+{
+    FPATH=${FDIR}/sql/Svrc/${SvrId}
+    mkdir -p ${FPATH}
+    PrtMsg "配置导入目录[${FPATH}]" "${NORM}" "${NORM}"
+
+    #如果服务修改系统并且协议名称和系统名称一致
+    if [ "x${DelSvrNode}" != "x" ];then
+        if [ ! -s ${FPATH}/bindmap.insert.sql ] || [ ! -s ${FPATH}/servicesystemmap.insert.sql ];then
+            UpDateSql "${DelSvrNode}-${SvrId}" "bindmap" "serviceid='${SvrId}'" "protocolid='${SvrNode}_adapter'"
+            UpDateSql "${DelSvrNode}-${SvrId}" "servicesystemmap" "serviceid='${SvrId}'" "name='${SvrNode}',adapter='${SvrNode}_adapter'"
+            return
+        fi
+        
+        if [ -s ${FPATH}/bindmap.insert.sql ] && [ -s ${FPATH}/servicesystemmap.insert.sql ];then
+            if [ `cat ${FPATH}/bindmap.insert.sql|grep "${DelSvrNode}_adapter"|wc -l` -ne 0 ] || [ `cat ${FPATH}/servicesystemmap.insert.sql|grep "${DelSvrNode}_adapter"|wc -l` -ne 0 ];then
+                UpDateSql "${DelSvrNode}-${SvrId}" "bindmap" "serviceid='${SvrId}'" "protocolid='${SvrNode}_adapter'"
+                UpDateSql "${DelSvrNode}-${SvrId}" "servicesystemmap" "serviceid='${SvrId}'" "name='${SvrNode}',adapter='${SvrNode}_adapter'"
+                return
+            fi
+        fi
+    fi
+
+    #导入数据
+    DumpIn "${SvrId}" "services" "name='${SvrId}'" "${FPATH}"
+    DumpIn "${SvrId}" "bussservices" "serviceid='${SvrId}'" "${FPATH}"
+    DumpIn "${SvrId}" "serviceinfo" "serviceid='${SvrId}'" "${FPATH}"
+    DumpIn "${SvrId}" "bindmap" "serviceid='${SvrId}'" "${FPATH}"
+    DumpIn "${SvrId}" "dataadapter" "dataadapterid='${SvrId}'" "${FPATH}"
+    DumpIn "${SvrId}" "servicesystemmap" "serviceid='${SvrId}'" "${FPATH}"
+    DumpIn "${SvrId}" "deployments" "name='${SvrId}'" "${FPATH}"
+    echo ""
+}
+
+#管理服务识别service_identify导出
+OutputMngServiceIdentify()
+{
+    #导出数据
+    if [ "x${DelSvrNode}" != "x" ];then
+        FPATH=${FDIR}/sql/ServiceIdentify/${DelSvrNode}/${SvrId}
+        mkdir -p ${FPATH}
+        PrtMsg "配置导出目录[${FPATH}]" "${NORM}" "${NORM}"
+        DumpOut "${DelSvrNode}-${SvrId}" "esb_service_identify" "channel_id='${DelSvrNode}' and channel_service='${SvrId}'" "${FPATH}"
+    fi
+
+    FPATH=${FDIR}/sql/ServiceIdentify/${SvrNode}/${SvrId}
+    mkdir -p ${FPATH}
+    PrtMsg "配置导出目录[${FPATH}]" "${NORM}" "${NORM}"
+    DumpOut "${SvrNode}-${SvrId}" "esb_service_identify" "channel_id='${SvrNode}' and channel_service='${SvrId}'" "${FPATH}"
+    echo ""
+}
+
+#管理服务识别service_identify导入
+InputMngServiceIdentify()
+{
+    #导入数据
+    if [ "x${DelSvrNode}" != "x" ];then
+        FPATH=${FDIR}/sql/ServiceIdentify/${SvrNode}/${SvrId}
+        mkdir -p ${FPATH}
+        if [ -s ${FPATH}/esb_service_identify.insert.sql ];then
+            DelSql "${DelSvrNode}-${SvrId}" "esb_service_identify" "channel_id='${DelSvrNode}' and channel_service='${SvrId}'" 
+        else
+            UpDateSql "${DelSvrNode}-${SvrId}" "esb_service_identify" "channel_id='${DelSvrNode}' and channel_service='${SvrId}'" "channel_id='${SvrNode}'"
+            return
+        fi
+    fi  
+
+    FPATH=${FDIR}/sql/ServiceIdentify/${SvrNode}/${SvrId}
+    mkdir -p ${FPATH}
+    PrtMsg "配置导入目录[${FPATH}]" "${NORM}" "${NORM}"
+    DumpIn "${SvrNode}-${SvrId}" "esb_service_identify" "channel_id='${SvrNode}' and channel_service='${SvrId}'" "${FPATH}"
+    echo ""
+}
+
+#管理系统识别system_identify导出
+OutputMngSystemIdentify()
+{
+    #导出数据
+    if [ "x${DelSvrNode}" != "x" ];then
+        FPATH=${FDIR}/sql/SystemIdentify/${DelSvrNode}/${SvrId}
+        mkdir -p ${FPATH}
+        PrtMsg "配置导出目录[${FPATH}]" "${NORM}" "${NORM}"
+        DumpOut "${DelSvrNode}-${SvrId}" "esb_system_identify" "system_id='${DelSvrNode}' and service_id='${SvrId}'" "${FPATH}"
+    fi
+
+    FPATH=${FDIR}/sql/SystemIdentify/${SvrNode}/${SvrId}
+    mkdir -p ${FPATH}
+    PrtMsg "配置导出目录[${FPATH}]" "${NORM}" "${NORM}"
+    DumpOut "${SvrNode}-${SvrId}" "esb_system_identify" "system_id='${SvrNode}' and service_id='${SvrId}'" "${FPATH}"
+    echo ""
+}
+
+#管理系统识别system_identify导入
+InputMngSystemIdentify()
+{
+    #导入数据
+    if [ "x${DelSvrNode}" != "x" ];then
+        FPATH=${FDIR}/sql/SystemIdentify/${SvrNode}/${SvrId}
+        mkdir -p ${FPATH}
+        if [ -s ${FPATH}/esb_system_identify.insert.sql ];then
+            DelSql "${DelSvrNode}-${SvrId}" "esb_system_identify" "service_id='${SvrId}'" 
+        else
+            UpDateSql "${DelSvrNode}-${SvrId}" "esb_system_identify" "service_id='${SvrId}'" "system_id='${SvrNode}'"
+            return
+        fi
+    fi 
+
+    FPATH=${FDIR}/sql/SystemIdentify/${SvrNode}/${SvrId}
+    mkdir -p ${FPATH}
+    PrtMsg "配置导入目录[${FPATH}]" "${NORM}" "${NORM}"
+    DumpIn "${SvrNode}-${SvrId}" "esb_system_identify" "system_id='${SvrNode}' and service_id='${SvrId}'" "${FPATH}"
+    echo ""
+}
+
+
+#监控渠道导出
+OutputImonChnlNode()
+{
+    FPATH=${FDIR}/sql/imon/${SvrNode}
+    mkdir -p ${FPATH}
+    PrtMsg "配置导出目录[${FPATH}]" "${NORM}" "${NORM}"
+
+    #导出数据
+    DumpOut "${SvrNode}" "serviceinfo" "servicetype='CHANNEL' and serviceid='${SvrNode}'" "${FPATH}"
+    DumpOut "${SvrNode}" "esb_mon_nmap" "id='${SvrNode}'" "${FPATH}"
+    echo ""
+}
+
+#监控渠道导入
+InputImonChnlNode()
+{
+    FPATH=${FDIR}/sql/imon/${SvrNode}
+    mkdir -p ${FPATH}
+    PrtMsg "配置导入目录[${FPATH}]" "${NORM}" "${NORM}"
+
+    #导入数据
+    DumpIn "${SvrNode}" "serviceinfo" "servicetype='CHANNEL' and serviceid='${SvrNode}'" "${FPATH}"
+    DumpIn "${SvrNode}" "esb_mon_nmap" "id='${SvrNode}'" "${FPATH}"
+    echo ""
+}
+
+#监控系统导出
+OutputImonHostNode()
+{
+    FPATH=${FDIR}/sql/imon/${SvrNode}
+    mkdir -p ${FPATH}
+    PrtMsg "配置导出目录[${FPATH}]" "${NORM}" "${NORM}"
+
+    #导出数据
+    DumpOut "${SvrNode}" "esb_mon_nmap" "id='${SvrNode}'" "${FPATH}"
+    echo ""
+}
+
+#监控系统导入
+InputImonHostNode()
+{
+    FPATH=${FDIR}/sql/imon/${SvrNode}
+    mkdir -p ${FPATH}
+    PrtMsg "配置导入目录[${FPATH}]" "${NORM}" "${NORM}"
+
+    #导入数据
+    DumpIn "${SvrNode}" "esb_mon_nmap" "id='${SvrNode}'" "${FPATH}"
+    echo ""
+}
+
+#监控服务导出
+OutputImonHostSvr()
+{
+    FPATH=${FDIR}/sql/imon/${SvrId}
+    mkdir -p ${FPATH}
+    PrtMsg "配置导出目录[${FPATH}]" "${NORM}" "${NORM}"
+
+    #导出数据
+    DumpOut "${SvrId}" "servicesystemmap" "name='${SvrNode}' and serviceid='${SvrId}'" "${FPATH}"
+    DumpOut "${SvrId}" "serviceinfo" "servicetype='BUSS' and serviceid='${SvrId}'" "${FPATH}"
+    DumpOut "${SvrId}" "esb_mon_nmap" "id='${SvrId}'" "${FPATH}"
+    echo ""
+}
+
+#监控服务导入
+InputImonHostSvr()
+{
+    FPATH=${FDIR}/sql/imon/${SvrId}
+    mkdir -p ${FPATH}
+    PrtMsg "配置导入目录[${FPATH}]" "${NORM}" "${NORM}"
+
+    #如果服务修改系统并且协议名称和系统名称一致
+    if [ "x${DelSvrNode}" != "x" ];then
+        if [ ! -s ${FPATH}/servicesystemmap.insert.sql ];then
+            UpDateSql "${DelSvrNode}-${SvrId}" "servicesystemmap" "serviceid='${SvrId}'" "name='${SvrNode}',adapter='${SvrNode}_adapter'"
+            return
+        fi
+
+        if [ -s ${FPATH}/servicesystemmap.insert.sql ];then
+            if [ `cat ${FPATH}/servicesystemmap.insert.sql|grep "${DelSvrNode}_adapter"|wc -l` -ne 0 ];then
+                UpDateSql "${DelSvrNode}-${SvrId}" "servicesystemmap" "serviceid='${SvrId}'" "name='${SvrNode}',adapter='${SvrNode}_adapter'"
+                return
+            fi
+        fi
+    fi
+
+    #导入数据
+    DumpIn "${SvrId}" "servicesystemmap" "name='${SvrNode}' and serviceid='${SvrId}'" "${FPATH}"
+    DumpIn "${SvrId}" "serviceinfo" "servicetype='BUSS' and serviceid='${SvrId}'" "${FPATH}"
+    DumpIn "${SvrId}" "esb_mon_nmap" "id='${SvrId}'" "${FPATH}"
+    echo ""
+}
+
+#############
+#管理渠道导出
+OutputMngChnl()
+{
+    if [ "x${SvrId}" = "x" ];then
+        OutputMngChnlNode ${SvrNode}
+    else
+        OutputMngServiceIdentify ${SvrNode} ${SvrId}
+    fi
+}
+
+#管理渠道导入
+InputMngChnl()
+{
+    if [ "x${SvrId}" = "x" ];then
+        InputMngChnlNode ${SvrNode}
+    else
+        InputMngServiceIdentify ${SvrNode} ${SvrId}
+    fi
+}
+
+#管理系统导出
+OutputMngHost()
+{
+    if [ "x${SvrId}" = "x" ];then
+        OutputMngHostNode ${SvrNode}
+    else
+        OutputMngHostSvr ${SvrNode} ${SvrId}
+        OutputMngSystemIdentify ${SvrNode} ${SvrId}
+    fi
+}
+
+#管理系统导入
+InputMngHost()
+{
+    if [ "x${SvrId}" = "x" ];then
+        InputMngHostNode ${SvrNode}
+    else
+        InputMngHostSvr ${SvrNode} ${SvrId}
+        InputMngSystemIdentify ${SvrNode} ${SvrId}
+    fi
+}
+
+#监控渠道导出
+OutputImonChnl()
+{
+    if [ "x${SvrId}" = "x" ];then
+        OutputImonChnlNode ${SvrNode}
+    fi
+}
+
+#监控渠道导入
+InputImonChnl()
+{
+    if [ "x${SvrId}" = "x" ];then
+        InputImonChnlNode ${SvrNode}
+    fi
+}
+
+#监控系统导出
+OutputImonHost()
+{
+    if [ "x${SvrId}" = "x" ];then
+        OutputImonHostNode ${SvrNode}
+    else
+        OutputImonHostSvr ${SvrNode} ${SvrId}
+    fi
+}
+
+#监控系统导入
+InputImonHost()
+{
+    if [ "x${SvrId}" = "x" ];then
+        InputImonHostNode ${SvrNode}
+    else
+        InputImonHostSvr ${SvrNode} ${SvrId}
+    fi
+}
+
+
+#Proccess Begin
+case "${Type}${Flag}" in
+-c-o|co)
+    case "${LOGNAME}" in
+    esbapp)
+        OutputAppSvr in_conf ${SvrNode} ${SvrId}
+        ;;
+    esbmng)
+        OutputMngChnl ${SvrNode} ${SvrId}
+        ;;
+    esbimon)
+        OutputImonChnl ${SvrNode} ${SvrId}
+        ;;
+    *)
+        exit
+        ;;
+    esac
+    ;;
+
+-c-i|ci)
+    case "${LOGNAME}" in
+    esbapp)
+        InputAppSvr in_conf ${SvrNode} ${SvrId}
+        ;;
+    esbmng)
+        InputMngChnl ${SvrNode} ${SvrId}
+        ;;
+    esbimon)
+        InputImonChnl ${SvrNode} ${SvrId}
+        ;;
+    *)
+        exit
+        ;;
+    esac
+    ;;
+
+-h-o|ho)
+    case "${LOGNAME}" in
+    esbapp)
+        OutputAppSvr out_conf ${SvrNode} ${SvrId}
+        ;;
+    esbmng)
+        OutputMngHost ${SvrNode} ${SvrId}
+        ;;
+    esbimon)
+        OutputImonHost ${SvrNode} ${SvrId}
+        ;;
+    *)
+        exit
+        ;;
+    esac
+    ;;
+
+-h-i|hi)
+    case "${LOGNAME}" in
+    esbapp)
+        InputAppSvr out_conf ${SvrNode} ${SvrId}
+        ;;
+    esbmng)
+        InputMngHost ${SvrNode} ${SvrId}
+        ;;
+    esbimon)
+        InputImonHost ${SvrNode} ${SvrId} 
+        ;;
+    *)
+        exit
+        ;;
+    esac
+    ;;
+
+*)
+    HelpMenu
+    exit 
+    ;;
+esac
+
+#判断是否执行成功
+if [ "${EXITFLAG}" = "true" ];then
+    exit 1
+fi
