@@ -1,8 +1,6 @@
 ##############################################################
 #  Create for : artfhuanban.sh                               #
-#  Create by  : weiqs                                        #
 #  Create on  : 2016-08-01                                   #
-#  Create at  : Bank of ShangHai                             #
 #  System of  : RedHat                                       #
 ##############################################################
 PID=$$

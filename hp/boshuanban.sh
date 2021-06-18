@@ -1,8 +1,6 @@
 ##############################################################
 #  Create for : boshuanban.sh                                #
-#  Create by  : weiqs                                        #
 #  Create on  : 2018-04-01                                   #
-#  Create at  : Bank of ShangHai                             #
 #  System of  : RedHat                                       #
 ##############################################################
 

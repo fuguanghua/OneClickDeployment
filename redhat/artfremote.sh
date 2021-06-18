@@ -1,8 +1,6 @@
 ##############################################################
 #  Create for : artfremote.sh                                #
-#  Create by  : weiqs                                        #
 #  Create on  : 2017-01-01                                   #
-#  Create at  : Bank of ShangHai                             #
 #  System of  : RedHat                                       #
 ##############################################################
 PID=$$

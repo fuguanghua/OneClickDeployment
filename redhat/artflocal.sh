@@ -1,8 +1,6 @@
 ##############################################################
 #  Create for : artflocal.sh                                 #
-#  Create by  : weiqs                                        #
 #  Create on  : 2017-01-01                                   #
-#  Create at  : Bank of ShangHai                             #
 #  System of  : RedHat                                       #
 ##############################################################
 ARTFFLG='^artf([0-9]{3,8})([0-9a-z_.]{0,9})$|^BH_([A-Za-z0-9_.]{3,30})$'

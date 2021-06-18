@@ -1,9 +1,7 @@
 #!/bin/sh
 ##############################################################
 #  Create for : artfinit.sh                                  #
-#  Create by  : weiqs                                        #
 #  Create on  : 2016-08-01                                   #
-#  Create at  : Bank of ShangHai                             #
 #  System of  : HP-UNIX                                      #
 ##############################################################
 
